@@ -24,9 +24,9 @@ import (
 func main() {
 	c := ftp.NewFtp("127.0.0.1:8080", "toor", "235689", 1*time.Second)
 	if err := c.Conn(); err != nil{
-      fmt.Println(err)
-      return
-  }
+		fmt.Println(err)
+		return
+	}
 	d, _:= c.List("/")
 	for _, v:=range d{
 		fmt.Println(v.Name, v.Type, v.Size)
