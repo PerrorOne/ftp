@@ -38,6 +38,9 @@ type ServerConn struct {
 	timeout       time.Duration
 	features      map[string]string
 	mlstSupported bool
+
+	user     string
+	password string
 }
 
 // Entry describes a file and is returned by List().
@@ -55,90 +58,58 @@ type Response struct {
 	closed bool
 }
 
-// Connect is an alias to Dial, for backward compatibility
-func Connect(addr string) (*ServerConn, error) {
-	return Dial(addr)
+func NewFtp(addr, user, password string, timeout time.Duration) *ServerConn {
+	return &ServerConn{user: user, password: password, host: addr, timeout: timeout}
 }
 
-// Dial is like DialTimeout with no timeout
-func Dial(addr string) (*ServerConn, error) {
-	return DialTimeout(addr, 0)
-}
-
-// DialTimeout initializes the connection to the specified ftp server address.
-//
-// It is generally followed by a call to Login() as most FTP commands require
-// an authenticated user.
-func DialTimeout(addr string, timeout time.Duration) (*ServerConn, error) {
-	tconn, err := net.DialTimeout("tcp", addr, timeout)
+func (s *ServerConn) Conn() error {
+	c, err := net.DialTimeout("tcp", s.host, s.timeout)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Use the resolved IP address in case addr contains a domain name
 	// If we use the domain name, we might not resolve to the same IP.
-	remoteAddr := tconn.RemoteAddr().(*net.TCPAddr)
-
-	conn := textproto.NewConn(tconn)
-
-	c := &ServerConn{
-		conn:     conn,
-		host:     remoteAddr.IP.String(),
-		timeout:  timeout,
-		features: make(map[string]string),
-		Location: time.UTC,
-	}
-
-	_, _, err = c.conn.ReadResponse(StatusReady)
-	if err != nil {
-		c.Quit()
-		return nil, err
-	}
-
-	err = c.feat()
-	if err != nil {
-		c.Quit()
-		return nil, err
-	}
-
-	if _, mlstSupported := c.features["MLST"]; mlstSupported {
-		c.mlstSupported = true
-	}
-
-	return c, nil
-}
-
-// Login authenticates the client with specified user and password.
-//
-// "anonymous"/"anonymous" is a common user/password scheme for FTP servers
-// that allows anonymous read-only accounts.
-func (c *ServerConn) Login(user, password string) error {
-	code, message, err := c.cmd(-1, "USER %s", user)
-	if err != nil {
+	remoteAddr := c.RemoteAddr().(*net.TCPAddr)
+	conn := textproto.NewConn(c)
+	s.conn = conn
+	s.host = remoteAddr.IP.String()
+	s.features = make(map[string]string)
+	s.Location = time.Local
+	if _, _, err := s.conn.ReadResponse(StatusReady); err != nil {
+		s.Quit()
 		return err
 	}
-
-	switch code {
-	case StatusLoggedIn:
-	case StatusUserOK:
-		_, _, err = c.cmd(StatusLoggedIn, "PASS %s", password)
-		if err != nil {
+	if err := s.feat(); err != nil {
+		s.Quit()
+		return err
+	}
+	if _, mlstSupported := s.features["MLST"]; mlstSupported {
+		s.mlstSupported = true
+	}
+	if s.user != "" {
+		if code, message, err := s.cmd(-1, "USER %s", s.user); err != nil {
+			s.Quit()
 			return err
+		} else {
+			switch code {
+			case StatusLoggedIn:
+			case StatusUserOK:
+				_, _, err = s.cmd(StatusLoggedIn, "PASS %s", s.password)
+				if err != nil {
+					return err
+				}
+			default:
+				return errors.New(message)
+			}
 		}
-	default:
-		return errors.New(message)
 	}
-
-	// Switch to binary mode
-	if _, _, err = c.cmd(StatusCommandOK, "TYPE I"); err != nil {
+	if _, _, err = s.cmd(StatusCommandOK, "TYPE I"); err != nil {
 		return err
 	}
-
-	// Switch to UTF-8
-	err = c.setUTF8()
-
-	return err
+	return s.setUTF8()
 }
+
 
 // feat issues a FEAT FTP command to list the additional commands supported by
 // the remote FTP server.
@@ -188,10 +159,10 @@ func (c *ServerConn) setUTF8() error {
 		return err
 	}
 
-        // Workaround for FTP servers, that does not support this option.
-        if code == StatusBadArguments {
-                return nil
-        }
+	// Workaround for FTP servers, that does not support this option.
+	if code == StatusBadArguments {
+		return nil
+	}
 
 	// The ftpd "filezilla-server" has FEAT support for UTF8, but always returns
 	// "202 UTF8 mode is always enabled. No need to send this command." when
